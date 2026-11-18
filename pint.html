@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Pint Tower</title>
+<style>
+  html,body{margin:0;height:100%;background:#120c08;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none;font-family:Georgia,'Times New Roman',serif}
+  canvas{display:block;width:100vw;height:100vh}
+  #ui{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+  .panel{pointer-events:auto;background:rgba(18,12,8,.88);border:2px solid #d9c49a;border-radius:14px;padding:22px 26px;max-width:340px;text-align:center;color:#f3e7cc;box-shadow:0 10px 40px rgba(0,0,0,.6)}
+  .panel h1{margin:0 0 6px;font-size:30px;color:#f3e7cc;letter-spacing:1px}
+  .panel p{margin:8px 0;font-size:15px;line-height:1.4;color:#d9c9a8}
+  .panel img{border-radius:50%;width:90px;height:auto;margin:4px auto 6px;display:block}
+  button{font:inherit;font-size:18px;margin-top:12px;padding:10px 26px;border-radius:30px;border:0;background:#d9c49a;color:#1a120b;font-weight:bold;cursor:pointer}
+  a.back{display:block;margin-top:12px;color:#d9c9a8;font-size:14px}
+  .hide{display:none!important}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div class="panel" id="start">
+    <img id="faceImg" alt="">
+    <h1>Pint Tower</h1>
+    <p>Pints of the black stuff are falling from the sky. Catch them on your tray and stack them up.</p>
+    <p>Move left and right to keep the tower from toppling. Lean right? Run right under it.</p>
+    <p><b>Reach the top and you get to drink the lot.</b></p>
+    <p style="font-size:13px;opacity:.8">Arrow keys / A-D, or hold the left or right side of the screen.</p>
+    <button id="go">Start</button>
+    <a class="back" href="index.html">← All games</a>
+  </div>
+  <div class="panel hide" id="end">
+    <h1 id="endT"></h1>
+    <p id="endP"></p>
+    <button id="again">Go again</button>
+    <a class="back" href="index.html">← All games</a>
+  </div>
+</div>
+<script>
+(()=>{
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const FACE="face.jpg";
+const face=new Image();face.src=FACE;document.getElementById('faceImg').src=FACE;
+let W,H,DPR,ground,pintH,pintW,manH;
+const TARGET=10;
+function resize(){
+  DPR=Math.min(window.devicePixelRatio||1,2);
+  W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);
+  ground=H-40;
+  manH=Math.min(190,H*0.26);
+  pintH=Math.min(44,(ground-manH-50)/TARGET);
+  pintW=pintH*0.72;
+}
+addEventListener('resize',resize);resize();
+
+// ---------- state ----------
+let state='menu',cart=null,man,stack,falling,lean,leanV,spawnT,lives,particles,msgs,t0,drinkT,shake,missFx;
+function reset(){
+  man={x:W/2,v:0,a:0,face:0};
+  stack=[];falling=[];particles=[];msgs=[];
+  cart=null;lean=0;leanV=0;spawnT=0.8;lives=5;drinkT=0;shake=0;
+}
+reset();
+
+// ---------- input ----------
+const keys={};
+addEventListener('keydown',e=>{keys[e.key.toLowerCase()]=1;if(e.key.startsWith('Arrow'))e.preventDefault();});
+addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=0});
+const touches=new Map();
+cv.addEventListener('pointerdown',e=>{touches.set(e.pointerId,e.clientX);cv.setPointerCapture(e.pointerId)});
+cv.addEventListener('pointermove',e=>{if(touches.has(e.pointerId))touches.set(e.pointerId,e.clientX)});
+['pointerup','pointercancel'].forEach(n=>cv.addEventListener(n,e=>touches.delete(e.pointerId)));
+function inputDir(){
+  let d=0;
+  if(keys['arrowleft']||keys['a'])d-=1;
+  if(keys['arrowright']||keys['d'])d+=1;
+  for(const x of touches.values())d+=x<W/2?-1:1;
+  return Math.max(-1,Math.min(1,d));
+}
+
+// ---------- geometry ----------
+const trayY=()=>ground-manH-6;            // top of tray
+function pintPos(i){                       // base centre of pint i, with lean and slight bend
+  const h=(i)*pintH;
+  const bend=lean*(1+i*0.04);
+  return {x:man.x+Math.sin(bend)*h, y:trayY()-Math.cos(bend)*h, ang:bend};
+}
+function topPos(){return pintPos(stack.length)}
+
+// ---------- loop ----------
+let last=performance.now();
+function frame(now){
+  let dt=Math.min(0.033,(now-last)/1000);last=now;
+  if(state==='play')update(dt);
+  else if(state==='drink')updateDrink(dt);
+  else if(state==='cart')updateCart(dt);
+  updateFx(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+function update(dt){
+  // man movement
+  const dir=inputDir();
+  const ACC=2600,MAXV=520;
+  const prevV=man.v;
+  man.v+=dir*ACC*dt;
+  if(!dir)man.v*=Math.pow(0.0008,dt);
+  man.v=Math.max(-MAXV,Math.min(MAXV,man.v));
+  man.x+=man.v*dt;
+  const m=pintW*0.9+20;
+  if(man.x<m){man.x=m;man.v=0}
+  if(man.x>W-m){man.x=W-m;man.v=0}
+  man.a=Math.max(-3000,Math.min(3000,(man.v-prevV)/dt));
+
+  // tower balance: inverted pendulum that gets twitchier as it grows
+  const n=stack.length;
+  if(n>0){
+    const tip=n*0.3;                                    // gravity's tipping pull grows with height
+    const spring=4.2;                                   // your arms' natural correction
+    let alpha=(tip-spring)*Math.sin(lean) - man.a*0.003/(1+n*0.03)*Math.cos(lean) - 1.7*leanV;
+    alpha+=(Math.random()-0.5)*n*0.15;                   // a bit of wobble
+    leanV+=alpha*dt;lean+=leanV*dt;
+    const topDx=Math.abs(Math.sin(lean))*n*pintH;
+    if(Math.abs(lean)>0.72 || topDx>pintW*4+n*2){topple();return}
+  }else{lean*=0.9;leanV=0}
+
+  // spawn pints
+  spawnT-=dt;
+  if(spawnT<=0&&falling.length<2){
+    const tp=topPos();
+    let x=(tp.x*0.5+W*0.25)+(Math.random()-0.5)*Math.min(W*0.7,240+n*10);
+    const mg=pintW*0.9+30;x=Math.max(mg,Math.min(W-mg,x));
+    falling.push({x,y:-4,vy:120+n*9,rot:(Math.random()-0.5)*0.4,spin:(Math.random()-0.5)*1.5});
+    spawnT=Math.max(0.9,2.0-n*0.06);
+  }
+
+  // falling pints
+  for(let i=falling.length-1;i>=0;i--){
+    const p=falling[i];
+    p.vy+=260*dt;p.y+=p.vy*dt;p.rot+=p.spin*dt;
+    const tp=topPos();
+    if(p.y>=tp.y-2&&p.y-p.vy*dt<tp.y+pintH*0.5){
+      const dx=p.x-tp.x;
+      if(Math.abs(dx)<pintW*1.35){
+        falling.splice(i,1);
+        stack.push({fill:1});
+        leanV+=(dx/pintW)*0.3+ (p.vy/600)*Math.sign(lean)*0.15;
+        msgs.push({x:tp.x,y:tp.y-pintH,t:1,txt:Math.abs(dx)<pintW*0.25?'Perfect!':'+1'});
+        if(stack.length>=TARGET){win();}
+        continue;
+      }
+    }
+    if(p.y>ground){
+      falling.splice(i,1);smash(p.x,ground);lives--;shake=0.25;
+      msgs.push({x:p.x,y:ground-50,t:1.2,txt:'Ah no!'});
+      if(lives<=0){gameOver('You let five pints hit the floor.','Sacrilege.');}
+    }
+  }
+}
+
+function smash(x,y){
+  for(let k=0;k<26;k++){
+    const a=-Math.PI*Math.random(),s=80+Math.random()*260;
+    particles.push({x,y:y-4,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:0.8+Math.random()*0.6,
+      c:k%3?'#1b0f08':(k%2?'#efe2c0':'rgba(220,235,245,.8)'),r:2+Math.random()*3});
+  }
+}
+function topple(){
+  const n=stack.length;
+  for(let i=0;i<n;i++){const p=pintPos(i+0.5);smash(p.x+Math.sign(lean)*i*8,ground)}
+  shake=0.6;
+  gameOver(`The tower toppled at ${n} pint${n===1?'':'s'}.`,n>=10?'So close. The barman is weeping.':'Steady hands next time.');
+}
+function gameOver(a,b){
+  saveBest(stack.length);state='over';stack=[];falling=[];
+  setTimeout(()=>{show('end');endT.textContent='Game over';endP.innerHTML=a+'<br>'+b+`<br><br>Best: ${best()}`;},700);
+}
+function win(){
+  state='drink';falling=[];drinkT=0;saveBest(TARGET);
+  msgs.push({x:W/2,y:H*0.25,t:2.5,txt:'You reached the top!'});
+}
+function updateDrink(dt){
+  drinkT+=dt;
+  // settle the tower
+  lean*=Math.pow(0.05,dt);leanV=0;
+  // drink from the top down: each pint drains in 0.5s
+  const per=0.45;
+  const idx=stack.length-1-Math.floor(Math.max(0,drinkT-1.2)/per);
+  for(let i=stack.length-1;i>=0;i--){
+    if(i>idx)stack[i].fill=0;
+    else if(i===idx)stack[i].fill=1-((drinkT-1.2)%per)/per;
+  }
+  man.face=Math.sin(drinkT*14)*0.08;
+  if(drinkT>1.2&&Math.random()<dt*20){particles.push({x:man.x+(Math.random()-.5)*W*.8,y:-10,vx:(Math.random()-.5)*60,vy:60+Math.random()*80,life:4,c:['#d9c49a','#2e7d32','#f3e7cc','#ff9800'][Math.random()*4|0],r:3+Math.random()*3,conf:1})}
+  if(idx<-1){
+    state='cart';
+    // leave the empties standing on the floor and cartwheel off to the far side
+    cart={x0:man.x,rot:0,t:0,dir:man.x<W/2?1:-1};
+    msgs.push({x:man.x,y:trayY()-60,t:2,txt:'*BURP*'});
+  }
+}
+function updateCart(dt){
+  cart.t+=dt;
+  if(cart.t<0.9){man.face=Math.sin(cart.t*20)*0.1;return}   // brief wind-up after the burp
+  man.face=0;
+  man.x+=cart.dir*Math.max(240,W*0.35)*dt;
+  cart.rot+=cart.dir*Math.PI*2*1.1*dt;
+  if(man.x<-manH*1.2||man.x>W+manH*1.2){
+    state='won';
+    setTimeout(()=>{show('end');endT.textContent='Sláinte!';endP.innerHTML=`You stacked all ${TARGET} pints to the top, drank every last one of them and cartwheeled out the door.<br><br>Legend.`;},500);
+  }
+}
+function updateFx(dt){
+  for(let i=particles.length-1;i>=0;i--){const p=particles[i];p.vy+=(p.conf?20:600)*dt;p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt;
+    if(!p.conf&&p.y>ground){p.y=ground;p.vy*=-0.3;p.vx*=0.6}
+    if(p.life<=0)particles.splice(i,1)}
+  for(let i=msgs.length-1;i>=0;i--){msgs[i].t-=dt;msgs[i].y-=30*dt;if(msgs[i].t<=0)msgs.splice(i,1)}
+  if(shake>0)shake-=dt;
+}
+
+// ---------- drawing ----------
+function drawPint(x,y,ang,fill=1,alpha=1){
+  // (x,y)=base centre
+  ctx.save();ctx.translate(x,y);ctx.rotate(ang);ctx.globalAlpha=alpha;
+  const h=pintH-2,wb=pintW*0.74,wt=pintW;
+  // glass shape (nonic-ish)
+  const g=new Path2D();
+  g.moveTo(-wb/2,0);g.lineTo(-wt/2*0.97,-h*0.78);g.quadraticCurveTo(-wt/2*1.05,-h*0.86,-wt/2*0.98,-h);
+  g.lineTo(wt/2*0.98,-h);g.quadraticCurveTo(wt/2*1.05,-h*0.86,wt/2*0.97,-h*0.78);g.lineTo(wb/2,0);g.closePath();
+  ctx.save();ctx.clip(g);
+  ctx.fillStyle='rgba(220,235,245,.12)';ctx.fillRect(-wt,-h,wt*2,h);
+  if(fill>0){
+    const top=-h*0.97*fill;
+    const grad=ctx.createLinearGradient(-wt/2,0,wt/2,0);
+    grad.addColorStop(0,'#1a0d06');grad.addColorStop(.35,'#2b140a');grad.addColorStop(1,'#0c0603');
+    ctx.fillStyle=grad;ctx.fillRect(-wt,top,wt*2,-top);
+    ctx.fillStyle='rgba(120,40,15,.35)';ctx.fillRect(-wt,-4,wt*2,4);
+    const headH=Math.max(2,h*0.15*Math.min(1,fill*1.5));
+    ctx.fillStyle='#f1e6c8';ctx.fillRect(-wt,top-headH*0.2,wt*2,headH);
+    ctx.fillStyle='#e2d3ad';ctx.fillRect(-wt,top+headH*0.6,wt*2,1.5);
+  }
+  ctx.restore();
+  ctx.strokeStyle='rgba(235,245,255,.75)';ctx.lineWidth=1.3;ctx.stroke(g);
+  ctx.fillStyle='rgba(255,255,255,.28)';ctx.fillRect(-wt*0.33,-h*0.92,2,h*0.7);
+  ctx.restore();
+}
+
+function drawMan(){
+  const x=man.x,gy=ground,hH=manH*0.34,hW=hH*0.76;
+  const step=Math.sin(performance.now()/90)*Math.min(1,Math.abs(man.v)/300);
+  const hipY=gy-manH*0.42,shY=gy-manH*0.74;
+  const spin=state==='cart'||(state==='won'&&cart);
+  if(spin){const cy=gy-manH*0.62-Math.abs(Math.sin(cart.rot))*manH*0.12;ctx.save();ctx.translate(x,cy);ctx.rotate(cart.rot);ctx.translate(-x,-cy);}
+  ctx.lineCap='round';ctx.lineJoin='round';
+  // legs
+  ctx.strokeStyle='#26324a';ctx.lineWidth=manH*0.085;
+  ctx.beginPath();ctx.moveTo(x-6,hipY);ctx.lineTo(x-8+step*12,gy-6);ctx.moveTo(x+6,hipY);ctx.lineTo(x+8-step*12,gy-6);ctx.stroke();
+  ctx.fillStyle='#2a1a10';
+  ctx.beginPath();ctx.ellipse(x-10+step*12,gy-4,10,5,0,0,7);ctx.ellipse(x+10-step*12,gy-4,10,5,0,0,7);ctx.fill();
+  // body (light blue shirt)
+  const bw=manH*0.26;
+  ctx.fillStyle='#a9c4e4';
+  ctx.beginPath();ctx.moveTo(x-bw/2,shY);ctx.lineTo(x+bw/2,shY);ctx.lineTo(x+bw*0.42,hipY+4);ctx.lineTo(x-bw*0.42,hipY+4);ctx.closePath();ctx.fill();
+  ctx.strokeStyle='#8eaacd';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(x,shY+4);ctx.lineTo(x,hipY);ctx.stroke();
+  ctx.fillStyle='#fff';for(let k=1;k<4;k++){ctx.beginPath();ctx.arc(x+2,shY+k*(hipY-shY)/4,1.6,0,7);ctx.fill()}
+  ctx.fillStyle='#26324a';ctx.fillRect(x-bw*0.44,hipY,bw*0.88,6);
+  // arms up to tray
+  const ty=trayY()+4,tw=pintW*1.9;
+  ctx.strokeStyle='#a9c4e4';ctx.lineWidth=manH*0.07;
+  ctx.beginPath();ctx.moveTo(x-bw/2+3,shY+4);ctx.lineTo(x-bw*0.95,shY-manH*0.12);ctx.lineTo(x-tw*0.38,ty+3);
+  ctx.moveTo(x+bw/2-3,shY+4);ctx.lineTo(x+bw*0.95,shY-manH*0.12);ctx.lineTo(x+tw*0.38,ty+3);ctx.stroke();
+  ctx.fillStyle='#e6b89c';ctx.beginPath();ctx.arc(x-tw*0.38,ty+3,manH*0.035,0,7);ctx.arc(x+tw*0.38,ty+3,manH*0.035,0,7);ctx.fill();
+  // tray (follows the lean a little); left behind when cartwheeling
+  if(!spin){ctx.save();ctx.translate(x,ty);ctx.rotate(lean*0.3);
+  ctx.fillStyle='#b9b9b9';ctx.fillRect(-tw/2,-4,tw,6);ctx.fillStyle='#8a8a8a';ctx.fillRect(-tw/2,2,tw,2);ctx.restore();}
+  // neck + head with face
+  ctx.fillStyle='#e0ab8c';ctx.fillRect(x-hW*0.18,shY-hH*0.18,hW*0.36,hH*0.25);
+  ctx.save();ctx.translate(x,shY-hH*0.5);ctx.rotate(man.face - man.v/4000 + lean*0.15);
+  if(face.complete){ctx.beginPath();ctx.ellipse(0,0,hW/2-1,hH/2-1,0,0,7);ctx.clip();ctx.drawImage(face,-hW/2,-hH/2,hW,hH);}
+  ctx.restore();
+  if(spin)ctx.restore();
+}
+
+function draw(){
+  ctx.save();
+  if(shake>0)ctx.translate((Math.random()-.5)*14*shake,(Math.random()-.5)*14*shake);
+  // background: pub
+  const bg=ctx.createLinearGradient(0,0,0,H);bg.addColorStop(0,'#2a1a10');bg.addColorStop(.7,'#3d2616');bg.addColorStop(1,'#1b110a');
+  ctx.fillStyle=bg;ctx.fillRect(-20,-20,W+40,H+40);
+  // wood panelling
+  ctx.strokeStyle='rgba(0,0,0,.25)';ctx.lineWidth=2;
+  for(let x=0;x<W;x+=70){ctx.beginPath();ctx.moveTo(x,H*0.55);ctx.lineTo(x,ground);ctx.stroke()}
+  ctx.fillStyle='rgba(0,0,0,.25)';ctx.fillRect(0,H*0.55,W,6);
+  // warm lights
+  for(let x=W*0.15;x<W;x+=W*0.35){const r=ctx.createRadialGradient(x,40,2,x,40,160);r.addColorStop(0,'rgba(255,200,120,.35)');r.addColorStop(1,'rgba(255,200,120,0)');ctx.fillStyle=r;ctx.fillRect(x-160,-120,320,320)}
+  // finish line
+  const finishY=trayY()-TARGET*pintH;
+  ctx.setLineDash([8,8]);ctx.strokeStyle='rgba(241,230,200,.55)';ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(0,finishY);ctx.lineTo(W,finishY);ctx.stroke();ctx.setLineDash([]);
+  ctx.fillStyle='rgba(241,230,200,.7)';ctx.font='bold 13px Georgia';ctx.textAlign='right';ctx.fillText('THE TOP',W-10,finishY-6);
+  // floor
+  ctx.fillStyle='#140c07';ctx.fillRect(-20,ground,W+40,H-ground+20);
+  ctx.fillStyle='#4a2f1b';ctx.fillRect(-20,ground,W+40,3);
+
+  if(state!=='over'){
+    if(cart){
+      // empties left standing on the floor, tray underneath
+      const tw=pintW*1.9;ctx.fillStyle='#b9b9b9';ctx.fillRect(cart.x0-tw/2,ground-5,tw,5);
+      for(let i=0;i<stack.length;i++)drawPint(cart.x0,ground-5-i*pintH,0,0);
+      drawMan();
+    }else{drawMan();for(let i=0;i<stack.length;i++){const p=pintPos(i);drawPint(p.x,p.y,p.ang,stack[i].fill)}}
+  }
+  for(const p of falling)drawPint(p.x,p.y,p.rot);
+  for(const p of particles){ctx.fillStyle=p.c;ctx.globalAlpha=Math.min(1,p.life*2);ctx.fillRect(p.x-p.r/2,p.y-p.r/2,p.r,p.r)}
+  ctx.globalAlpha=1;
+  ctx.textAlign='center';
+  for(const m of msgs){ctx.globalAlpha=Math.min(1,m.t*2);ctx.font='bold 20px Georgia';ctx.fillStyle='#000';ctx.fillText(m.txt,m.x+2,m.y+2);ctx.fillStyle='#f3e7cc';ctx.fillText(m.txt,m.x,m.y)}
+  ctx.globalAlpha=1;
+  // HUD
+  if(state==='play'||state==='drink'||state==='cart'||state==='won'){
+    ctx.textAlign='left';ctx.font='bold 20px Georgia';ctx.fillStyle='#f3e7cc';
+    ctx.fillText(`Pints: ${stack.length} / ${TARGET}`,14,30);
+    ctx.font='16px Georgia';ctx.fillText('Lives: '+'🍺'.repeat(Math.max(0,lives)),14,54);
+    // wobble meter
+    if(state==='play'&&stack.length>2){
+      const mw=120,mx=W-mw-14,my=22;ctx.fillStyle='rgba(0,0,0,.4)';ctx.fillRect(mx,my,mw,10);
+      const v=Math.max(-1,Math.min(1,lean/0.72));ctx.fillStyle=Math.abs(v)>0.6?'#e53935':Math.abs(v)>0.3?'#ffb300':'#7cb342';
+      ctx.fillRect(mx+mw/2,my,v*mw/2,10);ctx.fillStyle='#f3e7cc';ctx.fillRect(mx+mw/2-1,my-3,2,16);
+      ctx.font='12px Georgia';ctx.textAlign='center';ctx.fillText('WOBBLE',mx+mw/2,my+26);
+    }
+  }
+  ctx.restore();
+}
+
+// ---------- UI ----------
+const start=document.getElementById('start'),end=document.getElementById('end'),endT=document.getElementById('endT'),endP=document.getElementById('endP');
+function show(id){start.classList.toggle('hide',id!=='start');end.classList.toggle('hide',id!=='end')}
+function best(){try{return +localStorage.getItem('pintBest')||0}catch(e){return 0}}
+function saveBest(n){try{if(n>best())localStorage.setItem('pintBest',n)}catch(e){}}
+function begin(){reset();show('none');state='play'}
+document.getElementById('go').onclick=begin;
+document.getElementById('again').onclick=begin;
+})();
+</script>
+</body>
+</html>
