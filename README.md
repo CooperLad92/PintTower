@@ -1,6 +1,6 @@
 # Pint Tower
 
-Catch the pints of the black stuff falling from the sky and stack them on your tray. Run left and right to keep the tower from toppling. Stack 15 to reach the top and drink the lot.
+Catch the pints of the black stuff falling from the sky and stack them on your tray. Run left and right to keep the tower from toppling. Stack 10 to reach the top and drink the lot, then cartwheel off into the night.
 
 **Play:** https://cooperlad92.github.io/PintTower/
 
